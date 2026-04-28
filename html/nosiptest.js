@@ -1,62 +1,19 @@
-// We make use of this 'server' variable to provide the address of the
-// REST Janus API. By default, in this example we assume that Janus is
-// co-located with the web server hosting the HTML pages but listening
-// on a different port (8088, the default for HTTP in Janus), which is
-// why we make use of the 'window.location.hostname' base address. Since
-// Janus can also do HTTPS, and considering we don't really want to make
-// use of HTTP for Janus if your demos are served on HTTPS, we also rely
-// on the 'window.location.protocol' prefix to build the variable, in
-// particular to also change the port used to contact Janus (8088 for
-// HTTP and 8089 for HTTPS, if enabled).
-// In case you place Janus behind an Apache frontend (as we did on the
-// online demos at http://janus.conf.meetecho.com) you can just use a
-// relative path for the variable, e.g.:
-//
-// 		var server = "/janus";
-//
-// which will take care of this on its own.
-//
-//
-// If you want to use the WebSockets frontend to Janus, instead, you'll
-// have to pass a different kind of address, e.g.:
-//
-// 		var server = "ws://" + window.location.hostname + ":8188";
-//
-// Of course this assumes that support for WebSockets has been built in
-// when compiling the server. WebSockets support has not been tested
-// as much as the REST API, so handle with care!
-//
-//
-// If you have multiple options available, and want to let the library
-// autodetect the best way to contact your server (or pool of servers),
-// you can also pass an array of servers, e.g., to provide alternative
-// means of access (e.g., try WebSockets first and, if that fails, fall
-// back to plain HTTP) or just have failover servers:
-//
-//		var server = [
-//			"ws://" + window.location.hostname + ":8188",
-//			"/janus"
-//		];
-//
-// This will tell the library to try connecting to each of the servers
-// in the presented order. The first working server will be used for
-// the whole session.
-//
-var server = null;
-if(window.location.protocol === 'http:')
-	server = "http://" + window.location.hostname + ":8088/janus";
-else
-	server = "https://" + window.location.hostname + ":8089/janus";
+// We import the settings.js file to know which address we should contact
+// to talk to Janus, and optionally which STUN/TURN servers should be
+// used as well. Specifically, that file defines the "server" and
+// "iceServers" properties we'll pass when creating the Janus session.
 
 var janus = null;
 
 // We'll need two handles for this demo: a caller and a callee
 var caller = null, callee = null;
 var opaqueId = Janus.randomString(12);
-
+// The local and remote tracks only refer to the caller, though (we ignore the callee)
+var localTracks = {}, localVideos = 0,
+	remoteTracks = {}, remoteVideos = 0;
 var spinner = null;
 
-var videoenabled = true;
+var callstarted = false, videoenabled = true;
 var srtp = undefined ; // use "sdes_mandatory" to test SRTP-SDES
 
 $(document).ready(function() {
@@ -74,6 +31,11 @@ $(document).ready(function() {
 			janus = new Janus(
 				{
 					server: server,
+					iceServers: iceServers,
+					// Should the Janus API require authentication, you can specify either the API secret or user token here too
+					//		token: "mytoken",
+					//	or
+					//		apisecret: "serversecret",
 					success: function() {
 						// Attach to NoSIP plugin as a caller
 						janus.attach(
@@ -92,9 +54,13 @@ $(document).ready(function() {
 									// Negotiate WebRTC in a second (just to make sure both caller and callee handles exist)
 									setTimeout(function() {
 										Janus.debug("[caller] Trying a createOffer too (audio/video sendrecv)");
+										// We want bidirectional audio and video by default
 										caller.createOffer(
 											{
-												media: {audio: true, video: videoenabled},
+												tracks: [
+													{ type: 'audio', capture: true, recv: true },
+													{ type: 'video', capture: true, recv: true }
+												],
 												success: function(jsep) {
 													Janus.debug("[caller] Got SDP!", jsep);
 													// We now have a WebRTC SDP: to get a barebone SDP legacy
@@ -142,16 +108,20 @@ $(document).ready(function() {
 								iceState: function(state) {
 									Janus.log("[caller] ICE state changed to " + state);
 								},
-								mediaState: function(medium, on) {
-									Janus.log("[caller] Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								mediaState: function(medium, on, mid) {
+									Janus.log("[caller] Janus " + (on ? "started" : "stopped") + " receiving our " + medium + " (mid=" + mid + ")");
 								},
 								webrtcState: function(on) {
 									Janus.log("[caller] Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
 									$("#videoleft").parent().unblock();
+									if(on) {
+										callstarted = true;
+										$('#togglevideo').removeAttr('disabled').click(renegotiateVideo);
+									}
 								},
-								slowLink: function(uplink, lost) {
+								slowLink: function(uplink, lost, mid) {
 									Janus.warn("[caller] Janus reports problems " + (uplink ? "sending" : "receiving") +
-										" packets on this PeerConnection (" + lost + " lost packets)");
+										" packets on mid " + mid + " (" + lost + " lost packets)");
 								},
 								onmessage: function(msg, jsep) {
 									Janus.debug("[caller]  ::: Got a message :::", msg);
@@ -187,17 +157,81 @@ $(document).ready(function() {
 											if(jsep) {
 												Janus.debug("[caller] Handling SDP as well...", jsep);
 												caller.handleRemoteJsep({ jsep: jsep });
+												// If this was a renegotiation, update the button
+												if(callstarted) {
+													$('#togglevideo')
+														.text(videoenabled ? 'Disable video' : 'Enable video')
+														.removeAttr('disabled');
+												}
 											}
 										}
 									}
 								},
-								onlocalstream: function(stream) {
-									Janus.debug("[caller]  ::: Got a local stream :::", stream);
-									$('#videos').removeClass('hide').show();
-									if($('#myvideo').length === 0)
-										$('#videoleft').append('<video class="rounded centered" id="myvideo" width="100%" height="100%" autoplay playsinline muted="muted"/>');
-									Janus.attachMediaStream($('#myvideo').get(0), stream);
-									$("#myvideo").get(0).muted = "muted";
+								onlocaltrack: function(track, on) {
+									Janus.debug("Local track " + (on ? "added" : "removed") + ":", track);
+									// We use the track ID as name of the element, but it may contain invalid characters
+									var trackId = track.id.replace(/[{}]/g, "");
+									if(!on) {
+										// Track removed, get rid of the stream and the rendering
+										var stream = localTracks[trackId];
+										if(stream) {
+											try {
+												var tracks = stream.getTracks();
+												for(var i in tracks) {
+													var mst = tracks[i];
+													if(mst)
+														mst.stop();
+												}
+											} catch(e) {}
+										}
+										if(track.kind === "video") {
+											$('#myvideot' + trackId).remove();
+											localVideos--;
+											if(localVideos === 0) {
+												// No video, at least for now: show a placeholder
+												if($('#videoleft .no-video-container').length === 0) {
+													$('#videoleft').append(
+														'<div class="no-video-container">' +
+															'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+															'<span class="no-video-text">No webcam available</span>' +
+														'</div>');
+												}
+											}
+										}
+										delete localTracks[trackId];
+										return;
+									}
+									// If we're here, a new track was added
+									var stream = localTracks[trackId];
+									if(stream) {
+										// We've been here already
+										return;
+									}
+									if($('#videoleft video').length === 0) {
+										$('#videos').removeClass('hide').show();
+									}
+									if(track.kind === "audio") {
+										// We ignore local audio tracks, they'd generate echo anyway
+										if(localVideos === 0) {
+											// No video, at least for now: show a placeholder
+											if($('#videoleft .no-video-container').length === 0) {
+												$('#videoleft').append(
+													'<div class="no-video-container">' +
+														'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+														'<span class="no-video-text">No webcam available</span>' +
+													'</div>');
+											}
+										}
+									} else {
+										// New video track: create a stream out of it
+										localVideos++;
+										$('#videoleft .no-video-container').remove();
+										stream = new MediaStream([track]);
+										localTracks[trackId] = stream;
+										Janus.log("Created local stream:", stream);
+										$('#videoleft').append('<video class="rounded centered" id="myvideot' + trackId + '" width="100%" height="100%" autoplay playsinline muted="muted"/>');
+										Janus.attachMediaStream($('#myvideot' + trackId).get(0), stream);
+									}
 									if(caller.webrtcStuff.pc.iceConnectionState !== "completed" &&
 											caller.webrtcStuff.pc.iceConnectionState !== "connected") {
 										$("#videoleft").parent().block({
@@ -208,38 +242,34 @@ $(document).ready(function() {
 												color: 'white'
 											}
 										});
-										// No remote video yet
-										$('#videoright').append('<video class="rounded centered" id="waitingvideo" width="100%" height="100%" />');
-										if(spinner == null) {
-											var target = document.getElementById('videoright');
-											spinner = new Spinner({top:100}).spin(target);
-										} else {
-											spinner.spin();
-										}
-									}
-									var videoTracks = stream.getVideoTracks();
-									if(!videoTracks || videoTracks.length === 0) {
-										// No webcam
-										$('#myvideo').hide();
-										if($('#videoleft .no-video-container').length === 0) {
-											$('#videoleft').append(
-												'<div class="no-video-container">' +
-													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-													'<span class="no-video-text">No webcam available</span>' +
-												'</div>');
-										}
-									} else {
-										$('#videoleft .no-video-container').remove();
-										$('#myvideo').removeClass('hide').show();
 									}
 								},
-								onremotestream: function(stream) {
-									Janus.debug("[caller]  ::: Got a remote stream :::", stream);
-									if($('#peervideo').length === 0) {
+								onremotetrack: function(track, mid, on) {
+									Janus.debug("[caller] Remote track (mid=" + mid + ") " + (on ? "added" : "removed") + ":", track);
+									if(!on) {
+										// Track removed, get rid of the stream and the rendering
+										$('#peervideo' + mid).remove();
+										if(track.kind === "video") {
+											remoteVideos--;
+											if(remoteVideos === 0) {
+												// No video, at least for now: show a placeholder
+												if($('#videoright .no-video-container').length === 0) {
+													$('#videoright').append(
+														'<div class="no-video-container">' +
+															'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+															'<span class="no-video-text">No remote video available</span>' +
+														'</div>');
+												}
+											}
+										}
+										delete remoteTracks[mid];
+										return;
+									}
+									// If we're here, a new track was added
+									if($('#videoright audio').length === 0 && $('#videoright video').length === 0) {
+										$('#videos').removeClass('hide').show();
 										$('#videoright').parent().find('h3').html(
 											'Send DTMF: <span id="dtmf" class="btn-group btn-group-xs"></span>');
-										$('#videoright').append(
-											'<video class="rounded centered hide" id="peervideo" width="100%" height="100%" autoplay playsinline/>');
 										for(var i=0; i<12; i++) {
 											if(i<10)
 												$('#dtmf').append('<button class="btn btn-info dtmf">' + i + '</button>');
@@ -252,79 +282,47 @@ $(document).ready(function() {
 											// Send DTMF tone (inband)
 											caller.dtmf({dtmf: { tones: $(this).text()}});
 										});
-										// Show the peer and hide the spinner when we get a playing event
-										$("#peervideo").bind("playing", function () {
-											$('#waitingvideo').remove();
-											if(this.videoWidth)
-												$('#peervideo').removeClass('hide').show();
-											if(spinner)
-												spinner.stop();
-											spinner = null;
-										});
 									}
-									Janus.attachMediaStream($('#peervideo').get(0), stream);
-									var videoTracks = stream.getVideoTracks();
-									if(!videoTracks || videoTracks.length === 0) {
-										// No remote video
-										$('#peervideo').hide();
-										if($('#videoright .no-video-container').length === 0) {
-											$('#videoright').append(
-												'<div class="no-video-container">' +
-													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-													'<span class="no-video-text">No remote video available</span>' +
-												'</div>');
+									if(track.kind === "audio") {
+										// New audio track: create a stream out of it, and use a hidden <audio> element
+										stream = new MediaStream([track]);
+										remoteTracks[mid] = stream;
+										Janus.log("[caller] Created remote audio stream:", stream);
+										$('#videoright').append('<audio class="hide" id="peervideo' + mid + '" autoplay playsinline/>');
+										Janus.attachMediaStream($('#peervideo' + mid).get(0), stream);
+										if(remoteVideos === 0) {
+											// No video, at least for now: show a placeholder
+											if($('#videoright .no-video-container').length === 0) {
+												$('#videoright').append(
+													'<div class="no-video-container">' +
+														'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+														'<span class="no-video-text">No remote video available</span>' +
+													'</div>');
+											}
 										}
 									} else {
+										// New video track: create a stream out of it
+										remoteVideos++;
 										$('#videoright .no-video-container').remove();
-										$('#peervideo').removeClass('hide').show();
+										stream = new MediaStream([track]);
+										remoteTracks[mid] = stream;
+										Janus.log("[caller] Created remote video stream:", stream);
+										$('#videoright').append('<video class="rounded centered" id="peervideo' + mid + '" width="100%" height="100%" autoplay playsinline/>');
+										Janus.attachMediaStream($('#peervideo' + mid).get(0), stream);
 									}
-
-									if(videoenabled) {
-										$('#togglevideo').html("Disable video").removeClass("btn-success").addClass("btn-danger");
-									} else {
-										$('#togglevideo').html("Enable video").removeClass("btn-danger").addClass("btn-success");
-									}
-
-									$('#togglevideo').unbind('click').removeAttr('disabled').click(
-										function() {
-											videoenabled = !videoenabled;
-											var media;
-											if(videoenabled) {
-												$('#togglevideo').html("Disable video").removeClass("btn-success").addClass("btn-danger");
-												media = {addVideo: true};
-											} else {
-												$('#togglevideo').html("Enable video").removeClass("btn-danger").addClass("btn-success");
-												media = {removeVideo: true};
-											}
-											caller.createOffer(
-												{
-													media: media,
-													success: function(jsep) {
-														Janus.debug("[caller] Got UPDATE SDP!");
-														Janus.debug(jsep);
-														var body = {
-															request: "generate",
-															update: true,
-															srtp: srtp
-														};
-														caller.send({message: body, jsep: jsep});
-													},
-													error: function(error) {
-														Janus.error("WebRTC error:", error);
-														bootbox.alert("WebRTC error... " + JSON.stringify(error));
-													}
-												});
-										});
 								},
 								oncleanup: function() {
 									Janus.log("[caller]  ::: Got a cleanup notification :::");
 									if(spinner)
 										spinner.stop();
 									spinner = null;
-									$('#myvideo').remove();
-									$('#waitingvideo').remove();
-									$("#videoleft").parent().unblock();
-									$('#peervideo').remove();
+									$("#videoleft").empty().parent().unblock();
+									$('#videoright').empty();
+									$('#dtmf').parent().html("Remote UA");
+									localTracks = {};
+									localVideos = 0;
+									remoteTracks = {};
+									remoteVideos = 0;
 								}
 							});
 						// Attach to NoSIP plugin as a callee
@@ -362,16 +360,16 @@ $(document).ready(function() {
 								iceState: function(state) {
 									Janus.log("[callee] ICE state changed to " + state);
 								},
-								mediaState: function(medium, on) {
-									Janus.log("[callee] Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								mediaState: function(medium, on, mid) {
+									Janus.log("[callee] Janus " + (on ? "started" : "stopped") + " receiving our " + medium + " (mid=" + mid + ")");
 								},
 								webrtcState: function(on) {
 									Janus.log("[callee] Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
 									$("#videoleft").parent().unblock();
 								},
-								slowLink: function(uplink, lost) {
+								slowLink: function(uplink, lost, mid) {
 									Janus.warn("[callee] Janus reports problems " + (uplink ? "sending" : "receiving") +
-										" packets on this PeerConnection (" + lost + " lost packets)");
+										" packets on mid " + mid + " (" + lost + " lost packets)");
 								},
 								onmessage: function(msg, jsep) {
 									Janus.debug("[callee]  ::: Got a message :::", msg);
@@ -396,7 +394,11 @@ $(document).ready(function() {
 												{
 													// This is the WebRTC enriched offer the plugin gave us
 													jsep: jsep,
-													// No media provided: by default, it's sendrecv for audio and video
+													// We want bidirectional audio and video, if offered
+													tracks: [
+														{ type: 'audio', capture: true, recv: true },
+														{ type: 'video', capture: true, recv: true }
+													],
 													success: function(jsep) {
 														Janus.debug("[callee] Got SDP!", jsep);
 														// We now have a WebRTC SDP: to get a barebone SDP legacy
@@ -435,10 +437,10 @@ $(document).ready(function() {
 										}
 									}
 								},
-								onlocalstream: function(stream) {
+								onlocaltrack: function(track, on) {
 									// The callee is our fake peer, we don't display anything
 								},
-								onremotestream: function(stream) {
+								onremotetrack: function(track, mid, on) {
 									// The callee is our fake peer, we don't display anything
 								},
 								oncleanup: function() {
@@ -459,3 +461,39 @@ $(document).ready(function() {
 		});
 	}});
 });
+
+// We use this helper function to remove/add video to the call
+function renegotiateVideo() {
+	$('#togglevideo').attr('disabled', true);
+	let modifiedTrack = null;
+	if(videoenabled) {
+		// Renegotiate the call removing local video
+		videoenabled = false;
+		// We only want to modify the video track, removing our own
+		modifiedTrack = [{ type: 'video', mid: '1', remove: true }]
+	} else {
+		// Renegotiate the call removing local video
+		videoenabled = true;
+		// We only want to modify the video track, adding our own
+		modifiedTrack = [{ type: 'video', mid: '1', replace: true, capture: true }]
+	}
+	// Create an updated offer
+	caller.createOffer(
+		{
+			tracks: modifiedTrack,
+			success: function(jsep) {
+				Janus.debug("[caller] Got SDP!", jsep);
+				// As before, we ask the NoSIP plugin to generate a
+				// plain SDP we can then pass to the callee handle
+				var body = {
+					request: "generate",
+					srtp: srtp
+				};
+				caller.send({ message: body, jsep: jsep });
+			},
+			error: function(error) {
+				Janus.error("WebRTC error:", error);
+				bootbox.alert("WebRTC error... " + error.message);
+			}
+		});
+}

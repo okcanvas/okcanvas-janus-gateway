@@ -1,4 +1,4 @@
-AC_INIT([Janus WebRTC Server],[0.11.6],[https://github.com/meetecho/janus-gateway],[janus-gateway],[https://janus.conf.meetecho.com])
+AC_INIT([Janus WebRTC Server],[1.1.1],[https://github.com/meetecho/janus-gateway],[janus-gateway],[https://janus.conf.meetecho.com])
 AC_LANG(C)
 AC_CONFIG_AUX_DIR([.])
 AC_CONFIG_MACRO_DIR([m4])
@@ -9,7 +9,6 @@ AC_ENABLE_STATIC(no)
 AM_INIT_AUTOMAKE([foreign subdir-objects])
 AM_SILENT_RULES([yes])
 
-#AC_GNU_SOURCE has been deprecated (https://www.gnu.org/software/autoconf/manual/autoconf-2.69/html_node/Obsolete-Macros.html)
 AC_USE_SYSTEM_EXTENSIONS
 
 AC_PROG_CC
@@ -31,7 +30,6 @@ CFLAGS="$CFLAGS \
 	-Wformat-security \
 	-Wformat=2 \
 	-Winit-self \
-	-Winline \
 	-Wlarger-than=65537 \
 	-Wmissing-declarations \
 	-Wmissing-format-attribute \
@@ -39,11 +37,6 @@ CFLAGS="$CFLAGS \
 	-Wmissing-noreturn \
 	-Wmissing-prototypes \
 	-Wnested-externs \
-	-Wno-aggregate-return \
-	-Wno-missing-field-initializers \
-	-Wno-redundant-decls \
-	-Wno-undef \
-	-Wno-unused-parameter \
 	-Wold-style-definition \
 	-Wpacked \
 	-Wpointer-arith \
@@ -51,6 +44,8 @@ CFLAGS="$CFLAGS \
 	-Wstrict-prototypes \
 	-Wswitch-default \
 	-Wunused \
+	-Wno-unused-parameter \
+	-Wno-unused-result \
 	-Wwrite-strings \
 	-Werror=implicit-function-declaration"
 
@@ -75,10 +70,12 @@ cc*)
 		-Wunused-but-set-variable"
 esac
 
-JANUS_VERSION=116
+JANUS_VERSION=1101
 AC_SUBST(JANUS_VERSION)
-JANUS_VERSION_STRING="0.11.6"
+JANUS_VERSION_STRING="1.1.1"
 AC_SUBST(JANUS_VERSION_STRING)
+JANUS_VERSION_SO="1:1:1"
+AC_SUBST(JANUS_VERSION_SO)
 
 case "$host_os" in
 darwin*)
@@ -525,13 +522,6 @@ if test "x$enable_docs" = "xyes"; then
                           )
 fi
 
-AC_CHECK_PROG([GENGETOPT_CHECK],
-              [gengetopt],
-              [yes])
-if test x"$GENGETOPT_CHECK" != x"yes" ; then
-    AC_MSG_ERROR([Please install gengetopt before installing.])
-fi
-
 
 ##
 # Transports
@@ -663,7 +653,7 @@ AM_CONDITIONAL([ENABLE_GELFEVH], [test "x$enable_gelf_event_handler" = "xyes"])
 
 AM_CONDITIONAL([ENABLE_JSONLOGGER], [test "x$enable_json_logger" = "xyes"])
 
-AC_TRY_COMPILE([
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
                #include <stdlib.h>
                #include <sys/socket.h>
                #include <sys/un.h>
@@ -671,16 +661,13 @@ AC_TRY_COMPILE([
                  int pfd = socket(PF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK, 0);
                  if(pfd < 0)
                    exit(1);
-               }],
-               [],
-               [
+               }]], [[]])],[
                  AS_IF([test "x$enable_unix_sockets" != "xno"],
                  [
                     AC_DEFINE(HAVE_PFUNIX)
                     enable_unix_sockets=yes
                  ])
-               ],
-               [
+               ],[
                  AS_IF([test "x$enable_unix_sockets" = "xyes"],
                        [AC_MSG_ERROR([SOCK_SEQPACKET not defined in your OS. Use --disable-unix-sockets])])
                ])
@@ -850,6 +837,19 @@ PKG_CHECK_MODULES([LUA],
 AC_SUBST([LUA_CFLAGS])
 AC_SUBST([LUA_LIBS])
 
+PKG_CHECK_MODULES([DUKTAPE],
+                  [duktape],
+                  [
+                    AS_IF([test "x$enable_plugin_duktape" = "xmaybe"],
+                          [enable_plugin_duktape=yes])
+                  ],
+                  [
+                    AS_IF([test "x$enable_plugin_duktape" = "xyes"],
+                          [AC_MSG_ERROR([duktape not found. See README.md for installation instructions or use --disable-plugin-duktape])])
+                  ])
+AC_SUBST([DUKTAPE_CFLAGS])
+AC_SUBST([DUKTAPE_LIBS])
+
 AM_CONDITIONAL([ENABLE_PLUGIN_AUDIOBRIDGE], [test "x$enable_plugin_audiobridge" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_DUKTAPE], [test "x$enable_plugin_duktape" = "xyes"])
 AM_CONDITIONAL([ENABLE_PLUGIN_ECHOTEST], [test "x$enable_plugin_echotest" = "xyes"])
@@ -982,6 +982,7 @@ AM_CONDITIONAL([ENABLE_PCAP2MJR], [test "x$enable_pcap2mjr" = "xyes"])
 
 AC_CONFIG_FILES([
   Makefile
+  src/Makefile
   html/Makefile
   docs/Makefile
 ])

@@ -1,57 +1,14 @@
-// We make use of this 'server' variable to provide the address of the
-// REST Janus API. By default, in this example we assume that Janus is
-// co-located with the web server hosting the HTML pages but listening
-// on a different port (8088, the default for HTTP in Janus), which is
-// why we make use of the 'window.location.hostname' base address. Since
-// Janus can also do HTTPS, and considering we don't really want to make
-// use of HTTP for Janus if your demos are served on HTTPS, we also rely
-// on the 'window.location.protocol' prefix to build the variable, in
-// particular to also change the port used to contact Janus (8088 for
-// HTTP and 8089 for HTTPS, if enabled).
-// In case you place Janus behind an Apache frontend (as we did on the
-// online demos at http://janus.conf.meetecho.com) you can just use a
-// relative path for the variable, e.g.:
-//
-// 		var server = "/janus";
-//
-// which will take care of this on its own.
-//
-//
-// If you want to use the WebSockets frontend to Janus, instead, you'll
-// have to pass a different kind of address, e.g.:
-//
-// 		var server = "ws://" + window.location.hostname + ":8188";
-//
-// Of course this assumes that support for WebSockets has been built in
-// when compiling the server. WebSockets support has not been tested
-// as much as the REST API, so handle with care!
-//
-//
-// If you have multiple options available, and want to let the library
-// autodetect the best way to contact your server (or pool of servers),
-// you can also pass an array of servers, e.g., to provide alternative
-// means of access (e.g., try WebSockets first and, if that fails, fall
-// back to plain HTTP) or just have failover servers:
-//
-//		var server = [
-//			"ws://" + window.location.hostname + ":8188",
-//			"/janus"
-//		];
-//
-// This will tell the library to try connecting to each of the servers
-// in the presented order. The first working server will be used for
-// the whole session.
-//
-var server = null;
-if(window.location.protocol === 'http:')
-	server = "http://" + window.location.hostname + ":8088/janus";
-else
-	server = "https://" + window.location.hostname + ":8089/janus";
+// We import the settings.js file to know which address we should contact
+// to talk to Janus, and optionally which STUN/TURN servers should be
+// used as well. Specifically, that file defines the "server" and
+// "iceServers" properties we'll pass when creating the Janus session.
 
 var janus = null;
 var recordplay = null;
 var opaqueId = "recordplaytest-"+Janus.randomString(12);
 
+var localTracks = {}, localVideos = 0,
+	remoteTracks = {}, remoteVideos = 0;
 var spinner = null;
 var bandwidth = 1024 * 1024;
 
@@ -66,7 +23,7 @@ var acodec = (getQueryStringValue("acodec") !== "" ? getQueryStringValue("acodec
 var vcodec = (getQueryStringValue("vcodec") !== "" ? getQueryStringValue("vcodec") : null);
 var vprofile = (getQueryStringValue("vprofile") !== "" ? getQueryStringValue("vprofile") : null);
 var doSimulcast = (getQueryStringValue("simulcast") === "yes" || getQueryStringValue("simulcast") === "true");
-var doSimulcast2 = (getQueryStringValue("simulcast2") === "yes" || getQueryStringValue("simulcast2") === "true");
+var doOpusred = (getQueryStringValue("opusred") === "yes" || getQueryStringValue("opusred") === "true");
 var recordData = (getQueryStringValue("data") !== "" ? getQueryStringValue("data") : null);
 if(recordData !== "text" && recordData !== "binary")
 	recordData = null;
@@ -86,6 +43,11 @@ $(document).ready(function() {
 			janus = new Janus(
 				{
 					server: server,
+					iceServers: iceServers,
+					// Should the Janus API require authentication, you can specify either the API secret or user token here too
+					//		token: "mytoken",
+					//	or
+					//		apisecret: "serversecret",
 					success: function() {
 						// Attach to Record&Play plugin
 						janus.attach(
@@ -131,12 +93,16 @@ $(document).ready(function() {
 								iceState: function(state) {
 									Janus.log("ICE state changed to " + state);
 								},
-								mediaState: function(medium, on) {
-									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								mediaState: function(medium, on, mid) {
+									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium + " (mid=" + mid + ")");
 								},
 								webrtcState: function(on) {
 									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
 									$("#videobox").parent().unblock();
+								},
+								slowLink: function(uplink, lost, mid) {
+									Janus.warn("Janus reports problems " + (uplink ? "sending" : "receiving") +
+										" packets on mid " + mid + " (" + lost + " lost packets)");
 								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message :::", msg);
@@ -149,7 +115,13 @@ $(document).ready(function() {
 												recordplay.createAnswer(
 													{
 														jsep: jsep,
-														media: { audioSend: false, videoSend: false, data: true },	// We want recvonly audio/video
+														// We only specify data channels here, as this way in
+														// case they were offered we'll enable them. Since we
+														// don't mention audio or video tracks, we autoaccept them
+														// as recvonly (since we won't capture anything ourselves)
+														tracks: [
+															{ type: 'data' }
+														],
 														success: function(jsep) {
 															Janus.debug("Got SDP!", jsep);
 															var body = { request: "start" };
@@ -222,17 +194,76 @@ $(document).ready(function() {
 										updateRecsList();
 									}
 								},
-								onlocalstream: function(stream) {
+								onlocaltrack: function(track, on) {
 									if(playing === true)
 										return;
-									Janus.debug(" ::: Got a local stream :::", stream);
+									Janus.debug("Local track " + (on ? "added" : "removed") + ":", track);
+									// We use the track ID as name of the element, but it may contain invalid characters
+									var trackId = track.id.replace(/[{}]/g, "");
+									if(!on) {
+										// Track removed, get rid of the stream and the rendering
+										var stream = localTracks[trackId];
+										if(stream) {
+											try {
+												var tracks = stream.getTracks();
+												for(var i in tracks) {
+													var mst = tracks[i];
+													if(mst)
+														mst.stop();
+												}
+											} catch(e) {}
+										}
+										if(track.kind === "video") {
+											$('#thevideo' + trackId).remove();
+											localVideos--;
+											if(localVideos === 0) {
+												// No video, at least for now: show a placeholder
+												if($('#videobox .no-video-container').length === 0) {
+													$('#videobox').append(
+														'<div class="no-video-container">' +
+															'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+															'<span class="no-video-text">No webcam available</span>' +
+														'</div>');
+												}
+											}
+										}
+										delete localTracks[trackId];
+										return;
+									}
+									// If we're here, a new track was added
+									var stream = localTracks[trackId];
+									if(stream) {
+										// We've been here already
+										return;
+									}
 									$('#videotitle').html("Recording...");
 									$('#stop').unbind('click').click(stop);
 									$('#video').removeClass('hide').show();
-									if($('#thevideo').length === 0)
-										$('#videobox').append('<video class="rounded centered" id="thevideo" width="100%" height="100%" autoplay playsinline muted="muted"/>');
-									Janus.attachMediaStream($('#thevideo').get(0), stream);
-									$("#thevideo").get(0).muted = "muted";
+									if($('#videobox video').length === 0) {
+										$('#videos').removeClass('hide').show();
+									}
+									if(track.kind === "audio") {
+										// We ignore local audio tracks, they'd generate echo anyway
+										if(localVideos === 0) {
+											// No video, at least for now: show a placeholder
+											if($('#videobox .no-video-container').length === 0) {
+												$('#videobox').append(
+													'<div class="no-video-container">' +
+														'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+														'<span class="no-video-text">No webcam available</span>' +
+													'</div>');
+											}
+										}
+									} else {
+										// New video track: create a stream out of it
+										localVideos++;
+										$('#videobox .no-video-container').remove();
+										stream = new MediaStream([track]);
+										localTracks[trackId] = stream;
+										Janus.log("Created local stream:", stream);
+										$('#videobox').append('<video class="rounded centered" id="thevideo' + trackId + '" width="100%" height="100%" autoplay playsinline muted="muted"/>');
+										Janus.attachMediaStream($('#thevideo' + trackId).get(0), stream);
+									}
 									if(recordplay.webrtcStuff.pc.iceConnectionState !== "completed" &&
 											recordplay.webrtcStuff.pc.iceConnectionState !== "connected") {
 										$("#videobox").parent().block({
@@ -244,44 +275,67 @@ $(document).ready(function() {
 											}
 										});
 									}
-									var videoTracks = stream.getVideoTracks();
-									if(!videoTracks || videoTracks.length === 0) {
-										// No remote video
-										$('#thevideo').hide();
-										if($('#videobox .no-video-container').length === 0) {
-											$('#videobox').append(
-												'<div class="no-video-container">' +
-													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-													'<span class="no-video-text">No remote video available</span>' +
-												'</div>');
-										}
-									} else {
-										$('#videobox .no-video-container').remove();
-										$('#thevideo').removeClass('hide').show();
-									}
 								},
-								onremotestream: function(stream) {
+								onremotetrack: function(track, mid, on) {
 									if(playing === false)
 										return;
-									Janus.debug(" ::: Got a remote stream :::", stream);
-									if($('#thevideo').length === 0) {
+									Janus.debug("Remote track (mid=" + mid + ") " + (on ? "added" : "removed") + ":", track);
+									if(!on) {
+										// Track removed, get rid of the stream and the rendering
+										$('#thevideo' + mid).remove();
+										if(track.kind === "video") {
+											remoteVideos--;
+											if(remoteVideos === 0) {
+												// No video, at least for now: show a placeholder
+												if($('#videobox .no-video-container').length === 0) {
+													$('#videobox').append(
+														'<div class="no-video-container">' +
+															'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+															'<span class="no-video-text">No remote video available</span>' +
+														'</div>');
+												}
+											}
+										}
+										delete remoteTracks[mid];
+										return;
+									}
+									// If we're here, a new track was added
+									if($('#videobox audio').length === 0 && $('#videobox video').length === 0) {
 										$('#videotitle').html(selectedRecordingInfo);
 										$('#stop').unbind('click').click(stop);
 										$('#video').removeClass('hide').show();
-										$('#videobox').append('<video class="rounded centered hide" id="thevideo" width="100%" height="100%" autoplay playsinline/>');
-										// No remote video yet
-										$('#videobox').append('<video class="rounded centered" id="waitingvideo" width="100%" height="100%" />');
-										if(spinner == null) {
-											var target = document.getElementById('videobox');
-											spinner = new Spinner({top:100}).spin(target);
-										} else {
-											spinner.spin();
+									}
+									if(track.kind === "audio") {
+										// New audio track: create a stream out of it, and use a hidden <audio> element
+										stream = new MediaStream([track]);
+										remoteTracks[mid] = stream;
+										Janus.log("Created remote audio stream:", stream);
+										$('#videobox').append('<audio class="hide" id="thevideo' + mid + '" autoplay playsinline/>');
+										Janus.attachMediaStream($('#thevideo' + mid).get(0), stream);
+										if(remoteVideos === 0) {
+											// No video, at least for now: show a placeholder
+											if($('#videobox .no-video-container').length === 0) {
+												$('#videobox').append(
+													'<div class="no-video-container">' +
+														'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+														'<span class="no-video-text">No remote video available</span>' +
+													'</div>');
+											}
 										}
+									} else {
+										// New video track: create a stream out of it
+										remoteVideos++;
+										$('#videobox .no-video-container').remove();
+										stream = new MediaStream([track]);
+										remoteTracks[mid] = stream;
+										Janus.log("Created remote video stream:", stream);
+										$('#videobox').append('<video class="rounded centered" id="thevideo' + mid + '" width="100%" height="100%" autoplay playsinline/>');
+										Janus.attachMediaStream($('#thevideo' + mid).get(0), stream);
 										if($('#curres').length === 0) {
 											$('#videobox').append(
 												'<span class="label label-primary" id="curres' +'" style="position: absolute; bottom: 0px; left: 0px; margin: 15px;"></span>' +
 												'<span class="label label-info" id="curbw' +'" style="position: absolute; bottom: 0px; right: 0px; margin: 15px;"></span>');
-											$("#video").bind("playing", function () {
+											$('#thevideo' + mid).bind("playing", function () {
 												var width = this.videoWidth;
 												var height = this.videoHeight;
 												$('#curres').text(width + 'x' + height);
@@ -290,37 +344,13 @@ $(document).ready(function() {
 												// Display updated bitrate, if supported
 												var bitrate = recordplay.getBitrate();
 												$('#curbw').text(bitrate);
-												var video = $('#thevideo').get(0);
+												var video = $('video').get(0);
 												var width = video.videoWidth;
 												var height = video.videoHeight;
 												if(width > 0 && height > 0)
 													$('#curres').text(width + 'x' + height);
 											}, 1000);
 										}
-										// Show the video, hide the spinner and show the resolution when we get a playing event
-										$("#thevideo").bind("playing", function () {
-											$('#waitingvideo').remove();
-											$('#thevideo').removeClass('hide');
-											if(spinner)
-												spinner.stop();
-											spinner = null;
-										});
-									}
-									Janus.attachMediaStream($('#thevideo').get(0), stream);
-									var videoTracks = stream.getVideoTracks();
-									if(!videoTracks || videoTracks.length === 0) {
-										// No remote video
-										$('#thevideo').hide();
-										if($('#videobox .no-video-container').length === 0) {
-											$('#videobox').append(
-												'<div class="no-video-container">' +
-													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-													'<span class="no-video-text">No remote video available</span>' +
-												'</div>');
-										}
-									} else {
-										$('#videobox .no-video-container').remove();
-										$('#thevideo').removeClass('hide').show();
 									}
 								},
 								ondataopen: function(data) {
@@ -359,6 +389,10 @@ $(document).ready(function() {
 									$('#list').removeAttr('disabled').click(updateRecsList);
 									$('#recset').removeAttr('disabled');
 									$('#recslist').removeAttr('disabled');
+									localTracks = {};
+									localVideos = 0;
+									remoteTracks = {};
+									remoteVideos = 0;
 									updateRecsList();
 								}
 							});
@@ -423,11 +457,11 @@ function updateRecsList() {
 			Janus.debug("Got a list of available recordings:", list);
 			for(var mp in list) {
 				Janus.debug("  >> [" + list[mp]["id"] + "] " + list[mp]["name"] + " (" + list[mp]["date"] + ")");
-				$('#recslist').append("<li><a href='#' id='" + list[mp]["id"] + "'>" + list[mp]["name"] + " [" + list[mp]["date"] + "]" + "</a></li>");
+				$('#recslist').append("<li><a href='#' id='" + list[mp]["id"] + "'>" + escapeXmlTags(list[mp]["name"]) + " [" + list[mp]["date"] + "]" + "</a></li>");
 			}
 			$('#recslist a').unbind('click').click(function() {
 				selectedRecording = $(this).attr("id");
-				selectedRecordingInfo = $(this).text();
+				selectedRecordingInfo = escapeXmlTags($(this).text());
 				$('#recset').html($(this).html()).parent().removeClass('open');
 				$('#play').removeAttr('disabled').click(startPlayout);
 				return false;
@@ -467,13 +501,15 @@ function startRecording() {
 
 		recordplay.createOffer(
 			{
-				// By default, it's sendrecv for audio and video... no datachannels,
-				// unless we've passed the query string argument to record those too
-				media: { data: (recordData != null) },
-				// If you want to test simulcasting (Chrome and Firefox only), then
-				// pass a ?simulcast=true when opening this demo page: it will turn
-				// the following 'simulcast' property to pass to janus.js to true
-				simulcast: doSimulcast,
+				// We want sendonly audio and video, since we'll just send
+				// media to Janus and not receive any back in this scenario
+				// (uncomment the data track if you want to also record data
+				// channels, even though there's no UI for that in the demo)
+				tracks: [
+					{ type: 'audio', capture: true, recv: false },
+					{ type: 'video', capture: true, recv: false, simulcast: doSimulcast },
+					//~ { type: 'data' },
+				],
 				success: function(jsep) {
 					Janus.debug("Got SDP!", jsep);
 					var body = { request: "record", name: myname };
@@ -487,6 +523,9 @@ function startRecording() {
 					// profile as well (e.g., ?vprofile=2 for VP9, or ?vprofile=42e01f for H.264)
 					if(vprofile)
 						body["videoprofile"] = vprofile;
+					// You can use RED for Opus, if the browser supports it
+					if(doOpusred)
+						body["opusred"] = true;
 					// If we're going to send binary data, let's tell the plugin
 					if(recordData === "binary")
 						body["textdata"] = false;
@@ -544,4 +583,13 @@ function getQueryStringValue(name) {
 	var regex = new RegExp("[\\?&]" + name + "=([^&#]*)"),
 		results = regex.exec(location.search);
 	return results === null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
+}
+
+// Helper to escape XML tags
+function escapeXmlTags(value) {
+	if(value) {
+		var escapedValue = value.replace(new RegExp('<', 'g'), '&lt');
+		escapedValue = escapedValue.replace(new RegExp('>', 'g'), '&gt');
+		return escapedValue;
+	}
 }

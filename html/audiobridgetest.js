@@ -1,57 +1,13 @@
-// We make use of this 'server' variable to provide the address of the
-// REST Janus API. By default, in this example we assume that Janus is
-// co-located with the web server hosting the HTML pages but listening
-// on a different port (8088, the default for HTTP in Janus), which is
-// why we make use of the 'window.location.hostname' base address. Since
-// Janus can also do HTTPS, and considering we don't really want to make
-// use of HTTP for Janus if your demos are served on HTTPS, we also rely
-// on the 'window.location.protocol' prefix to build the variable, in
-// particular to also change the port used to contact Janus (8088 for
-// HTTP and 8089 for HTTPS, if enabled).
-// In case you place Janus behind an Apache frontend (as we did on the
-// online demos at http://janus.conf.meetecho.com) you can just use a
-// relative path for the variable, e.g.:
-//
-// 		var server = "/janus";
-//
-// which will take care of this on its own.
-//
-//
-// If you want to use the WebSockets frontend to Janus, instead, you'll
-// have to pass a different kind of address, e.g.:
-//
-// 		var server = "ws://" + window.location.hostname + ":8188";
-//
-// Of course this assumes that support for WebSockets has been built in
-// when compiling the server. WebSockets support has not been tested
-// as much as the REST API, so handle with care!
-//
-//
-// If you have multiple options available, and want to let the library
-// autodetect the best way to contact your server (or pool of servers),
-// you can also pass an array of servers, e.g., to provide alternative
-// means of access (e.g., try WebSockets first and, if that fails, fall
-// back to plain HTTP) or just have failover servers:
-//
-//		var server = [
-//			"ws://" + window.location.hostname + ":8188",
-//			"/janus"
-//		];
-//
-// This will tell the library to try connecting to each of the servers
-// in the presented order. The first working server will be used for
-// the whole session.
-//
-var server = null;
-if(window.location.protocol === 'http:')
-	server = "http://" + window.location.hostname + ":8088/janus";
-else
-	server = "https://" + window.location.hostname + ":8089/janus";
+// We import the settings.js file to know which address we should contact
+// to talk to Janus, and optionally which STUN/TURN servers should be
+// used as well. Specifically, that file defines the "server" and
+// "iceServers" properties we'll pass when creating the Janus session.
 
 var janus = null;
 var mixertest = null;
 var opaqueId = "audiobridgetest-"+Janus.randomString(12);
 
+var remoteStream = null;
 var spinner = null;
 
 var myroom = 1234;	// Demo room
@@ -85,6 +41,11 @@ $(document).ready(function() {
 			janus = new Janus(
 				{
 					server: server,
+					iceServers: iceServers,
+					// Should the Janus API require authentication, you can specify either the API secret or user token here too
+					//		token: "mytoken",
+					//	or
+					//		apisecret: "serversecret",
 					success: function() {
 						// Attach to AudioBridge plugin
 						janus.attach(
@@ -132,8 +93,8 @@ $(document).ready(function() {
 								iceState: function(state) {
 									Janus.log("ICE state changed to " + state);
 								},
-								mediaState: function(medium, on) {
-									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								mediaState: function(medium, on, mid) {
+									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium + " (mid=" + mid + ")");
 								},
 								webrtcState: function(on) {
 									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
@@ -153,7 +114,10 @@ $(document).ready(function() {
 													// Publish our stream
 													mixertest.createOffer(
 														{
-															media: { video: false },	// This is an audio only room
+															// We only want bidirectional audio
+															tracks: [
+																{ type: 'audio', capture: true, recv: true },
+															],
 															customizeSdp: function(jsep) {
 																if(stereo && jsep.sdp.indexOf("stereo=1") == -1) {
 																	// Make sure that our offer contains stereo too
@@ -178,7 +142,7 @@ $(document).ready(function() {
 												Janus.debug("Got a list of participants:", list);
 												for(var f in list) {
 													var id = list[f]["id"];
-													var display = list[f]["display"];
+													var display = escapeXmlTags(list[f]["display"]);
 													var setup = list[f]["setup"];
 													var muted = list[f]["muted"];
 													var spatial = list[f]["spatial_position"];
@@ -222,7 +186,7 @@ $(document).ready(function() {
 												Janus.debug("Got a list of participants:", list);
 												for(var f in list) {
 													var id = list[f]["id"];
-													var display = list[f]["display"];
+													var display = escapeXmlTags(list[f]["display"]);
 													var setup = list[f]["setup"];
 													var muted = list[f]["muted"];
 													var spatial = list[f]["spatial_position"];
@@ -267,7 +231,7 @@ $(document).ready(function() {
 												Janus.debug("Got a list of participants:", list);
 												for(var f in list) {
 													var id = list[f]["id"];
-													var display = list[f]["display"];
+													var display = escapeXmlTags(list[f]["display"]);
 													var setup = list[f]["setup"];
 													var muted = list[f]["muted"];
 													var spatial = list[f]["spatial_position"];
@@ -327,23 +291,29 @@ $(document).ready(function() {
 										mixertest.handleRemoteJsep({ jsep: jsep });
 									}
 								},
-								onlocalstream: function(stream) {
-									Janus.debug(" ::: Got a local stream :::", stream);
+								onlocaltrack: function(track, on) {
+									Janus.debug("Local track " + (on ? "added" : "removed") + ":", track);
 									// We're not going to attach the local audio stream
 									$('#audiojoin').hide();
 									$('#room').removeClass('hide').show();
 									$('#participant').removeClass('hide').html(myusername).show();
 								},
-								onremotestream: function(stream) {
+								onremotetrack: function(track, mid, on) {
+									Janus.debug("Remote track (mid=" + mid + ") " + (on ? "added" : "removed") + ":", track);
+									if(remoteStream || track.kind !== "audio")
+										return;
+									if(!on) {
+										// Track removed, get rid of the stream and the rendering
+										remoteStream = null;
+										$('#roomaudio').remove();
+										return;
+									}
+									remoteStream = new MediaStream([track]);
 									$('#room').removeClass('hide').show();
-									var addButtons = false;
 									if($('#roomaudio').length === 0) {
-										addButtons = true;
 										$('#mixedaudio').append('<audio class="rounded centered" id="roomaudio" width="100%" height="100%" autoplay/>');
 									}
-									Janus.attachMediaStream($('#roomaudio').get(0), stream);
-									if(!addButtons)
-										return;
+									Janus.attachMediaStream($('#roomaudio').get(0), remoteStream);
 									// Mute button
 									audioenabled = true;
 									$('#toggleaudio').click(
@@ -375,6 +345,7 @@ $(document).ready(function() {
 									$('#list').empty();
 									$('#mixedaudio').empty();
 									$('#room').hide();
+									remoteStream = null;
 								}
 							});
 					},
@@ -429,7 +400,7 @@ function registerUsername() {
 			return;
 		}
 		var register = { request: "join", room: myroom, display: username };
-		myusername = username;
+		myusername = escapeXmlTags(username);
 		// Check if we need to join using G.711 instead of (default) Opus
 		if(acodec === 'opus' || acodec === 'pcmu' || acodec === 'pcma')
 			register.codec = acodec;
@@ -447,4 +418,13 @@ function getQueryStringValue(name) {
 	var regex = new RegExp("[\\?&]" + name + "=([^&#]*)"),
 		results = regex.exec(location.search);
 	return results === null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
+}
+
+// Helper to escape XML tags
+function escapeXmlTags(value) {
+	if(value) {
+		var escapedValue = value.replace(new RegExp('<', 'g'), '&lt');
+		escapedValue = escapedValue.replace(new RegExp('>', 'g'), '&gt');
+		return escapedValue;
+	}
 }

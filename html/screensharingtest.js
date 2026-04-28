@@ -1,53 +1,7 @@
-// We make use of this 'server' variable to provide the address of the
-// REST Janus API. By default, in this example we assume that Janus is
-// co-located with the web server hosting the HTML pages but listening
-// on a different port (8088, the default for HTTP in Janus), which is
-// why we make use of the 'window.location.hostname' base address. Since
-// Janus can also do HTTPS, and considering we don't really want to make
-// use of HTTP for Janus if your demos are served on HTTPS, we also rely
-// on the 'window.location.protocol' prefix to build the variable, in
-// particular to also change the port used to contact Janus (8088 for
-// HTTP and 8089 for HTTPS, if enabled).
-// In case you place Janus behind an Apache frontend (as we did on the
-// online demos at http://janus.conf.meetecho.com) you can just use a
-// relative path for the variable, e.g.:
-//
-// 		var server = "/janus";
-//
-// which will take care of this on its own.
-//
-//
-// If you want to use the WebSockets frontend to Janus, instead, you'll
-// have to pass a different kind of address, e.g.:
-//
-// 		var server = "ws://" + window.location.hostname + ":8188";
-//
-// Of course this assumes that support for WebSockets has been built in
-// when compiling the server. WebSockets support has not been tested
-// as much as the REST API, so handle with care!
-//
-//
-// If you have multiple options available, and want to let the library
-// autodetect the best way to contact your server (or pool of servers),
-// you can also pass an array of servers, e.g., to provide alternative
-// means of access (e.g., try WebSockets first and, if that fails, fall
-// back to plain HTTP) or just have failover servers:
-//
-//		var server = [
-//			"ws://" + window.location.hostname + ":8188",
-//			"/janus"
-//		];
-//
-// This will tell the library to try connecting to each of the servers
-// in the presented order. The first working server will be used for
-// the whole session.
-//
-var server = null;
-if(window.location.protocol === 'http:')
-	server = "http://" + window.location.hostname + ":8088/janus";
-else
-	server = "https://" + window.location.hostname + ":8089/janus";
-
+// We import the settings.js file to know which address we should contact
+// to talk to Janus, and optionally which STUN/TURN servers should be
+// used as well. Specifically, that file defines the "server" and
+// "iceServers" properties we'll pass when creating the Janus session.
 
 var janus = null;
 var screentest = null;
@@ -61,6 +15,8 @@ var role = null;
 var room = null;
 var source = null;
 
+var localTracks = {}, localVideos = 0,
+	remoteTracks = {}, remoteVideos = 0;
 var spinner = null;
 
 
@@ -91,6 +47,11 @@ $(document).ready(function() {
 			janus = new Janus(
 				{
 					server: server,
+					iceServers: iceServers,
+					// Should the Janus API require authentication, you can specify either the API secret or user token here too
+					//		token: "mytoken",
+					//	or
+					//		apisecret: "serversecret",
 					success: function() {
 						// Attach to VideoRoom plugin
 						janus.attach(
@@ -138,12 +99,12 @@ $(document).ready(function() {
 								iceState: function(state) {
 									Janus.log("ICE state changed to " + state);
 								},
-								mediaState: function(medium, on) {
-									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								mediaState: function(medium, on, mid) {
+									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium + " (mid=" + mid + ")");
 								},
 								webrtcState: function(on) {
 									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
-									$("#screencapture").parent().unblock();
+									$("#screencapture").parent().parent().unblock();
 									if(on) {
 										bootbox.alert("Your screen sharing session just started: pass the <b>" + room + "</b> session identifier to those who want to attend.");
 									} else {
@@ -153,6 +114,10 @@ $(document).ready(function() {
 										});
 									}
 								},
+								slowLink: function(uplink, lost, mid) {
+									Janus.warn("Janus reports problems " + (uplink ? "sending" : "receiving") +
+										" packets on mid " + mid + " (" + lost + " lost packets)");
+								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message (publisher) :::", msg);
 									var event = msg["videoroom"];
@@ -161,7 +126,7 @@ $(document).ready(function() {
 										if(event === "joined") {
 											myid = msg["id"];
 											$('#session').html(room);
-											$('#title').html(msg["description"]);
+											$('#title').html(escapeXmlTags(msg["description"]));
 											Janus.log("Successfully joined room " + msg["room"] + " with ID " + myid);
 											if(role === "publisher") {
 												// This is our session, publish our stream
@@ -171,7 +136,11 @@ $(document).ready(function() {
 													bootbox.alert("Safari requires a user gesture before the screen can be shared: close this dialog to do that. See issue #2455 for more details", function() {
 														screentest.createOffer(
 															{
-																media: { video: capture, audioSend: true, videoRecv: false},	// Screen sharing Publishers are sendonly
+																// We want to capture the screen and audio, but sendonly
+																tracks: [
+																	{ type: 'audio', capture: true, recv: false },
+																	{ type: 'screen', capture: true, recv: false }
+																],
 																success: function(jsep) {
 																	Janus.debug("Got publisher SDP!", jsep);
 																	var publish = { request: "configure", audio: true, video: true };
@@ -187,7 +156,11 @@ $(document).ready(function() {
 													// Other browsers should be fine, we try to call getDisplayMedia directly
 													screentest.createOffer(
 														{
-															media: { video: capture, audioSend: true, videoRecv: false},	// Screen sharing Publishers are sendonly
+															// We want sendonly audio and screensharing
+															tracks: [
+																{ type: 'audio', capture: true, recv: false },
+																{ type: 'screen', capture: true, recv: false }
+															],
 															success: function(jsep) {
 																Janus.debug("Got publisher SDP!", jsep);
 																var publish = { request: "configure", audio: true, video: true };
@@ -205,6 +178,8 @@ $(document).ready(function() {
 													var list = msg["publishers"];
 													Janus.debug("Got a list of available publishers/feeds:", list);
 													for(var f in list) {
+														if(list[f]["dummy"])
+															continue;
 														var id = list[f]["id"];
 														var display = list[f]["display"];
 														Janus.debug("  >> [" + id + "] " + display);
@@ -218,6 +193,8 @@ $(document).ready(function() {
 												var list = msg["publishers"];
 												Janus.debug("Got a list of available publishers/feeds:", list);
 												for(var f in list) {
+													if(list[f]["dummy"])
+														continue;
 													var id = list[f]["id"];
 													var display = list[f]["display"];
 													Janus.debug("  >> [" + id + "] " + display);
@@ -242,17 +219,73 @@ $(document).ready(function() {
 										screentest.handleRemoteJsep({ jsep: jsep });
 									}
 								},
-								onlocalstream: function(stream) {
-									Janus.debug(" ::: Got a local stream :::", stream);
+								onlocaltrack: function(track, on) {
+									Janus.debug("Local track " + (on ? "added" : "removed") + ":", track);
+									// We use the track ID as name of the element, but it may contain invalid characters
+									var trackId = track.id.replace(/[{}]/g, "");
+									if(!on) {
+										// Track removed, get rid of the stream and the rendering
+										var stream = localTracks[trackId];
+										if(stream) {
+											try {
+												var tracks = stream.getTracks();
+												for(var i in tracks) {
+													var mst = tracks[i];
+													if(mst)
+														mst.stop();
+												}
+											} catch(e) {}
+										}
+										if(track.kind === "video") {
+											$('#screenvideo' + trackId).remove();
+											localVideos--;
+											if(localVideos === 0) {
+												// No video, at least for now: show a placeholder
+												if($('#screencapture .no-video-container').length === 0) {
+													$('#screencapture').append(
+														'<div class="no-video-container">' +
+															'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+															'<span class="no-video-text">No webcam available</span>' +
+														'</div>');
+												}
+											}
+										}
+										delete localTracks[trackId];
+										return;
+									}
+									// If we're here, a new track was added
+									var stream = localTracks[trackId];
+									if(stream) {
+										// We've been here already
+										return;
+									}
 									$('#screenmenu').hide();
 									$('#room').removeClass('hide').show();
-									if($('#screenvideo').length === 0) {
-										$('#screencapture').append('<video class="rounded centered" id="screenvideo" width="100%" height="100%" autoplay playsinline muted="muted"/>');
+									if(track.kind === "audio") {
+										// We ignore local audio tracks, they'd generate echo anyway
+										if(localVideos === 0) {
+											// No video, at least for now: show a placeholder
+											if($('#screencapture .no-video-container').length === 0) {
+												$('#screencapture').append(
+													'<div class="no-video-container">' +
+														'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+														'<span class="no-video-text">No webcam available</span>' +
+													'</div>');
+											}
+										}
+									} else {
+										// New video track: create a stream out of it
+										localVideos++;
+										$('#screencapture .no-video-container').remove();
+										stream = new MediaStream([track]);
+										localTracks[trackId] = stream;
+										Janus.log("Created local stream:", stream);
+										$('#screencapture').append('<video class="rounded centered" id="screenvideo' + trackId + '" width=100% autoplay playsinline muted="muted"/>');
+										Janus.attachMediaStream($('#screenvideo' + trackId).get(0), stream);
 									}
-									Janus.attachMediaStream($('#screenvideo').get(0), stream);
 									if(screentest.webrtcStuff.pc.iceConnectionState !== "completed" &&
 											screentest.webrtcStuff.pc.iceConnectionState !== "connected") {
-										$("#screencapture").parent().block({
+										$("#screencapture").parent().parent().block({
 											message: '<b>Publishing...</b>',
 											css: {
 												border: 'none',
@@ -262,7 +295,7 @@ $(document).ready(function() {
 										});
 									}
 								},
-								onremotestream: function(stream) {
+								onremotetrack: function(track, mid, on) {
 									// The publisher stream is sendonly, we don't expect anything here
 								},
 								oncleanup: function() {
@@ -270,6 +303,8 @@ $(document).ready(function() {
 									$('#screencapture').empty();
 									$("#screencapture").parent().unblock();
 									$('#room').hide();
+									localTracks = {};
+									localVideos = 0;
 								}
 							});
 					},
@@ -318,39 +353,7 @@ function preShareScreen() {
 		return;
 	}
 	capture = "screen";
-	if(navigator.mozGetUserMedia) {
-		// Firefox needs a different constraint for screen and window sharing
-		bootbox.dialog({
-			title: "Share whole screen or a window?",
-			message: "Firefox handles screensharing in a different way: are you going to share the whole screen, or would you rather pick a single window/application to share instead?",
-			buttons: {
-				screen: {
-					label: "Share screen",
-					className: "btn-primary",
-					callback: function() {
-						capture = "screen";
-						shareScreen();
-					}
-				},
-				window: {
-					label: "Pick a window",
-					className: "btn-success",
-					callback: function() {
-						capture = "window";
-						shareScreen();
-					}
-				}
-			},
-			onEscape: function() {
-				$('#desc').removeAttr('disabled', true);
-				$('#create').removeAttr('disabled', true).click(preShareScreen);
-				$('#roomid').removeAttr('disabled', true);
-				$('#join').removeAttr('disabled', true).click(joinScreen);
-			}
-		});
-	} else {
-		shareScreen();
-	}
+	shareScreen();
 }
 
 function shareScreen() {
@@ -429,13 +432,15 @@ function newRemoteFeed(id, display) {
 			opaqueId: opaqueId,
 			success: function(pluginHandle) {
 				remoteFeed = pluginHandle;
+				remoteFeed.remoteTracks = {};
+				remoteFeed.remoteVideos = 0;
 				Janus.log("Plugin attached! (" + remoteFeed.getPlugin() + ", id=" + remoteFeed.getId() + ")");
 				Janus.log("  -- This is a subscriber");
 				// We wait for the plugin to send us an offer
 				var listen = {
 					request: "join",
 					room: room,
-					ptype: "listener",
+					ptype: "subscriber",
 					feed: id
 				};
 				remoteFeed.send({ message: listen });
@@ -443,6 +448,16 @@ function newRemoteFeed(id, display) {
 			error: function(error) {
 				Janus.error("  -- Error attaching plugin...", error);
 				bootbox.alert("Error attaching plugin... " + error);
+			},
+			iceState: function(state) {
+				Janus.log("ICE state (feed #" + remoteFeed.rfindex + ") changed to " + state);
+			},
+			webrtcState: function(on) {
+				Janus.log("Janus says this WebRTC PeerConnection (feed #" + remoteFeed.rfindex + ") is " + (on ? "up" : "down") + " now");
+			},
+			slowLink: function(uplink, lost, mid) {
+				Janus.warn("Janus reports problems " + (uplink ? "sending" : "receiving") +
+					" packets on mid " + mid + " (" + lost + " lost packets)");
 			},
 			onmessage: function(msg, jsep) {
 				Janus.debug(" ::: Got a message (listener) :::", msg);
@@ -470,7 +485,13 @@ function newRemoteFeed(id, display) {
 					remoteFeed.createAnswer(
 						{
 							jsep: jsep,
-							media: { audioSend: false, videoSend: false },	// We want recvonly audio/video
+							// We only specify data channels here, as this way in
+							// case they were offered we'll enable them. Since we
+							// don't mention audio or video tracks, we autoaccept them
+							// as recvonly (since we won't capture anything ourselves)
+							tracks: [
+								{ type: 'data' }
+							],
 							success: function(jsep) {
 								Janus.debug("Got SDP!", jsep);
 								var body = { request: "start", room: room };
@@ -483,27 +504,68 @@ function newRemoteFeed(id, display) {
 						});
 				}
 			},
-			onlocalstream: function(stream) {
+			onlocaltrack: function(track, on) {
 				// The subscriber stream is recvonly, we don't expect anything here
 			},
-			onremotestream: function(stream) {
-				if($('#screenvideo').length === 0) {
-					// No remote video yet
-					$('#screencapture').append('<video class="rounded centered" id="waitingvideo" width="100%" height="100%" />');
-					$('#screencapture').append('<video class="rounded centered hide" id="screenvideo" width="100%" height="100%" playsinline/>');
-					$('#screenvideo').get(0).volume = 0;
-					// Show the video, hide the spinner and show the resolution when we get a playing event
-					$("#screenvideo").bind("playing", function () {
-						$('#waitingvideo').remove();
-						$('#screenvideo').removeClass('hide');
-						if(spinner)
-							spinner.stop();
-						spinner = null;
-					});
+			onremotetrack: function(track, mid, on) {
+				Janus.debug("Remote track (mid=" + mid + ") " + (on ? "added" : "removed") + ":", track);
+				if(!on) {
+					// Track removed, get rid of the stream and the rendering
+					$('#screenvideo' + mid).remove();
+					if(track.kind === "video") {
+						remoteVideos--;
+						if(remoteVideos === 0) {
+							// No video, at least for now: show a placeholder
+							if($('#screencapture .no-video-container').length === 0) {
+								$('#screencapture').append(
+									'<div class="no-video-container">' +
+										'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+										'<span class="no-video-text">No remote video available</span>' +
+									'</div>');
+							}
+						}
+					}
+					delete remoteTracks[mid];
+					return;
 				}
-				Janus.attachMediaStream($('#screenvideo').get(0), stream);
-				$("#screenvideo").get(0).play();
-				$("#screenvideo").get(0).volume = 1;
+				// If we're here, a new track was added
+				if(spinner !== undefined && spinner !== null) {
+					spinner.stop();
+					spinner = null;
+				}
+				if(track.kind === "audio") {
+					// New audio track: create a stream out of it, and use a hidden <audio> element
+					stream = new MediaStream([track]);
+					remoteTracks[mid] = stream;
+					Janus.log("Created remote audio stream:", stream);
+					$('#screencapture').append('<audio class="hide" id="screenvideo' + mid + '" playsinline/>');
+					$('#screenvideo' + mid).get(0).volume = 0;
+					Janus.attachMediaStream($('#screenvideo' + mid).get(0), stream);
+					$('#screenvideo' + mid).get(0).play();
+					$('#screenvideo' + mid).get(0).volume = 1;
+					if(remoteVideos === 0) {
+						// No video, at least for now: show a placeholder
+						if($('#screencapture .no-video-container').length === 0) {
+							$('#screencapture').append(
+								'<div class="no-video-container">' +
+									'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+									'<span class="no-video-text">No remote video available</span>' +
+								'</div>');
+						}
+					}
+				} else {
+					// New video track: create a stream out of it
+					remoteVideos++;
+					$('#screencapture .no-video-container').remove();
+					stream = new MediaStream([track]);
+					remoteFeed.remoteTracks[mid] = stream;
+					Janus.log("Created remote video stream:", stream);
+					$('#screencapture').append('<video class="rounded centered" id="screenvideo' + mid + '" width=100% playsinline/>');
+					$('#screenvideo' + mid).get(0).volume = 0;
+					Janus.attachMediaStream($('#screenvideo' + mid).get(0), stream);
+					$('#screenvideo' + mid).get(0).play();
+					$('#screenvideo' + mid).get(0).volume = 1;
+				}
 			},
 			oncleanup: function() {
 				Janus.log(" ::: Got a cleanup notification (remote feed " + id + ") :::");
@@ -511,6 +573,17 @@ function newRemoteFeed(id, display) {
 				if(spinner)
 					spinner.stop();
 				spinner = null;
+				remoteFeed.remoteTracks = {};
+				remoteFeed.remoteVideos = 0;
 			}
 		});
+}
+
+// Helper to escape XML tags
+function escapeXmlTags(value) {
+	if(value) {
+		var escapedValue = value.replace(new RegExp('<', 'g'), '&lt');
+		escapedValue = escapedValue.replace(new RegExp('>', 'g'), '&gt');
+		return escapedValue;
+	}
 }

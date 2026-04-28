@@ -1,57 +1,14 @@
-// We make use of this 'server' variable to provide the address of the
-// REST Janus API. By default, in this example we assume that Janus is
-// co-located with the web server hosting the HTML pages but listening
-// on a different port (8088, the default for HTTP in Janus), which is
-// why we make use of the 'window.location.hostname' base address. Since
-// Janus can also do HTTPS, and considering we don't really want to make
-// use of HTTP for Janus if your demos are served on HTTPS, we also rely
-// on the 'window.location.protocol' prefix to build the variable, in
-// particular to also change the port used to contact Janus (8088 for
-// HTTP and 8089 for HTTPS, if enabled).
-// In case you place Janus behind an Apache frontend (as we did on the
-// online demos at http://janus.conf.meetecho.com) you can just use a
-// relative path for the variable, e.g.:
-//
-// 		var server = "/janus";
-//
-// which will take care of this on its own.
-//
-//
-// If you want to use the WebSockets frontend to Janus, instead, you'll
-// have to pass a different kind of address, e.g.:
-//
-// 		var server = "ws://" + window.location.hostname + ":8188";
-//
-// Of course this assumes that support for WebSockets has been built in
-// when compiling the server. WebSockets support has not been tested
-// as much as the REST API, so handle with care!
-//
-//
-// If you have multiple options available, and want to let the library
-// autodetect the best way to contact your server (or pool of servers),
-// you can also pass an array of servers, e.g., to provide alternative
-// means of access (e.g., try WebSockets first and, if that fails, fall
-// back to plain HTTP) or just have failover servers:
-//
-//		var server = [
-//			"ws://" + window.location.hostname + ":8188",
-//			"/janus"
-//		];
-//
-// This will tell the library to try connecting to each of the servers
-// in the presented order. The first working server will be used for
-// the whole session.
-//
-var server = null;
-if(window.location.protocol === 'http:')
-	server = "http://" + window.location.hostname + ":8088/janus";
-else
-	server = "https://" + window.location.hostname + ":8089/janus";
+// We import the settings.js file to know which address we should contact
+// to talk to Janus, and optionally which STUN/TURN servers should be
+// used as well. Specifically, that file defines the "server" and
+// "iceServers" properties we'll pass when creating the Janus session.
 
 var janus = null;
 var videocall = null;
 var opaqueId = "videocalltest-"+Janus.randomString(12);
 
+var localTracks = {}, localVideos = 0,
+	remoteTracks = {}, remoteVideos = 0;
 var bitrateTimer = null;
 var spinner = null;
 
@@ -62,7 +19,6 @@ var myusername = null;
 var yourusername = null;
 
 var doSimulcast = (getQueryStringValue("simulcast") === "yes" || getQueryStringValue("simulcast") === "true");
-var doSimulcast2 = (getQueryStringValue("simulcast2") === "yes" || getQueryStringValue("simulcast2") === "true");
 var simulcastStarted = false;
 
 $(document).ready(function() {
@@ -80,6 +36,11 @@ $(document).ready(function() {
 			janus = new Janus(
 				{
 					server: server,
+					iceServers: iceServers,
+					// Should the Janus API require authentication, you can specify either the API secret or user token here too
+					//		token: "mytoken",
+					//	or
+					//		apisecret: "serversecret",
 					success: function() {
 						// Attach to VideoCall plugin
 						janus.attach(
@@ -128,12 +89,16 @@ $(document).ready(function() {
 								iceState: function(state) {
 									Janus.log("ICE state changed to " + state);
 								},
-								mediaState: function(medium, on) {
-									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium);
+								mediaState: function(medium, on, mid) {
+									Janus.log("Janus " + (on ? "started" : "stopped") + " receiving our " + medium + " (mid=" + mid + ")");
 								},
 								webrtcState: function(on) {
 									Janus.log("Janus says our WebRTC PeerConnection is " + (on ? "up" : "down") + " now");
 									$("#videoleft").parent().unblock();
+								},
+								slowLink: function(uplink, lost, mid) {
+									Janus.warn("Janus reports problems " + (uplink ? "sending" : "receiving") +
+										" packets on mid " + mid + " (" + lost + " lost packets)");
 								},
 								onmessage: function(msg, jsep) {
 									Janus.debug(" ::: Got a message :::", msg);
@@ -148,7 +113,7 @@ $(document).ready(function() {
 										} else if(result["event"]) {
 											var event = result["event"];
 											if(event === 'registered') {
-												myusername = result["username"];
+												myusername = escapeXmlTags(result["username"]);
 												Janus.log("Successfully registered as " + myusername + "!");
 												$('#youok').removeClass('hide').show().html("Registered as '" + myusername + "'");
 												// Get a list of available peers, just for fun
@@ -163,7 +128,7 @@ $(document).ready(function() {
 												bootbox.alert("Waiting for the peer to answer...");
 											} else if(event === 'incomingcall') {
 												Janus.log("Incoming call from " + result["username"] + "!");
-												yourusername = result["username"];
+												yourusername = escapeXmlTags(result["username"]);
 												// Notify user
 												bootbox.hideAll();
 												incoming = bootbox.dialog({
@@ -180,12 +145,13 @@ $(document).ready(function() {
 																videocall.createAnswer(
 																	{
 																		jsep: jsep,
-																		// No media provided: by default, it's sendrecv for audio and video
-																		media: { data: true },	// Let's negotiate data channels as well
-																		// If you want to test simulcasting (Chrome and Firefox only), then
-																		// pass a ?simulcast=true when opening this demo page: it will turn
-																		// the following 'simulcast' property to pass to janus.js to true
-																		simulcast: doSimulcast,
+																		// We want bidirectional audio and video, if offered,
+																		// plus data channels too if they were negotiated
+																		tracks: [
+																			{ type: 'audio', capture: true, recv: true },
+																			{ type: 'video', capture: true, recv: true },
+																			{ type: 'data' },
+																		],
 																		success: function(jsep) {
 																			Janus.debug("Got SDP!", jsep);
 																			var body = { request: "accept" };
@@ -213,7 +179,7 @@ $(document).ready(function() {
 												});
 											} else if(event === 'accepted') {
 												bootbox.hideAll();
-												var peer = result["username"];
+												var peer = escapeXmlTags(result["username"]);
 												if(!peer) {
 													Janus.log("Call started!");
 												} else {
@@ -235,7 +201,13 @@ $(document).ready(function() {
 														videocall.createAnswer(
 															{
 																jsep: jsep,
-																media: { data: true },	// Let's negotiate data channels as well
+																// We want bidirectional audio and video, if offered,
+																// plus data channels too if they were negotiated
+																tracks: [
+																	{ type: 'audio', capture: true, recv: true },
+																	{ type: 'video', capture: true, recv: true },
+																	{ type: 'data' },
+																],
 																success: function(jsep) {
 																	Janus.debug("Got SDP!", jsep);
 																	var body = { request: "set" };
@@ -309,13 +281,71 @@ $(document).ready(function() {
 										bitrateTimer = null;
 									}
 								},
-								onlocalstream: function(stream) {
-									Janus.debug(" ::: Got a local stream :::", stream);
-									$('#videos').removeClass('hide').show();
-									if($('#myvideo').length === 0)
-										$('#videoleft').append('<video class="rounded centered" id="myvideo" width="100%" height="100%" autoplay playsinline muted="muted"/>');
-									Janus.attachMediaStream($('#myvideo').get(0), stream);
-									$("#myvideo").get(0).muted = "muted";
+								onlocaltrack: function(track, on) {
+									Janus.debug("Local track " + (on ? "added" : "removed") + ":", track);
+									// We use the track ID as name of the element, but it may contain invalid characters
+									var trackId = track.id.replace(/[{}]/g, "");
+									if(!on) {
+										// Track removed, get rid of the stream and the rendering
+										var stream = localTracks[trackId];
+										if(stream) {
+											try {
+												var tracks = stream.getTracks();
+												for(var i in tracks) {
+													var mst = tracks[i];
+													if(mst !== null && mst !== undefined)
+														mst.stop();
+												}
+											} catch(e) {}
+										}
+										if(track.kind === "video") {
+											$('#myvideo' + trackId).remove();
+											localVideos--;
+											if(localVideos === 0) {
+												// No video, at least for now: show a placeholder
+												if($('#videoleft .no-video-container').length === 0) {
+													$('#videoleft').append(
+														'<div class="no-video-container">' +
+															'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+															'<span class="no-video-text">No webcam available</span>' +
+														'</div>');
+												}
+											}
+										}
+										delete localTracks[trackId];
+										return;
+									}
+									// If we're here, a new track was added
+									var stream = localTracks[trackId];
+									if(stream) {
+										// We've been here already
+										return;
+									}
+									if($('#videoleft video').length === 0) {
+										$('#videos').removeClass('hide').show();
+									}
+									if(track.kind === "audio") {
+										// We ignore local audio tracks, they'd generate echo anyway
+										if(localVideos === 0) {
+											// No video, at least for now: show a placeholder
+											if($('#videoleft .no-video-container').length === 0) {
+												$('#videoleft').append(
+													'<div class="no-video-container">' +
+														'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+														'<span class="no-video-text">No webcam available</span>' +
+													'</div>');
+											}
+										}
+									} else {
+										// New video track: create a stream out of it
+										localVideos++;
+										$('#videoleft .no-video-container').remove();
+										stream = new MediaStream([track]);
+										localTracks[trackId] = stream;
+										Janus.log("Created local stream:", stream);
+										$('#videoleft').append('<video class="rounded centered" id="myvideo' + trackId + '" width="100%" height="100%" autoplay playsinline muted="muted"/>');
+										Janus.attachMediaStream($('#myvideo' + trackId).get(0), stream);
+									}
 									if(videocall.webrtcStuff.pc.iceConnectionState !== "completed" &&
 											videocall.webrtcStuff.pc.iceConnectionState !== "connected") {
 										$("#videoleft").parent().block({
@@ -326,74 +356,85 @@ $(document).ready(function() {
 												color: 'white'
 											}
 										});
-										// No remote video yet
-										$('#videoright').append('<video class="rounded centered" id="waitingvideo" width="100%" height="100%" />');
-										if(spinner == null) {
-											var target = document.getElementById('videoright');
-											spinner = new Spinner({top:100}).spin(target);
-										} else {
-											spinner.spin();
-										}
-									}
-									var videoTracks = stream.getVideoTracks();
-									if(!videoTracks || videoTracks.length === 0) {
-										// No webcam
-										$('#myvideo').hide();
-										if($('#videoleft .no-video-container').length === 0) {
-											$('#videoleft').append(
-												'<div class="no-video-container">' +
-													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-													'<span class="no-video-text">No webcam available</span>' +
-												'</div>');
-										}
-									} else {
-										$('#videoleft .no-video-container').remove();
-										$('#myvideo').removeClass('hide').show();
 									}
 								},
-								onremotestream: function(stream) {
-									Janus.debug(" ::: Got a remote stream :::", stream);
-									var addButtons = false;
-									if($('#remotevideo').length === 0) {
-										addButtons = true;
-										$('#videoright').append('<video class="rounded centered hide" id="remotevideo" width="100%" height="100%" autoplay playsinline/>');
-										// Show the video, hide the spinner and show the resolution when we get a playing event
-										$("#remotevideo").bind("playing", function () {
-											$('#waitingvideo').remove();
-											if(this.videoWidth)
-												$('#remotevideo').removeClass('hide').show();
-											if(spinner)
-												spinner.stop();
-											spinner = null;
-											var width = this.videoWidth;
-											var height = this.videoHeight;
-											$('#curres').removeClass('hide').text(width+'x'+height).show();
-										});
-										$('#callee').removeClass('hide').html(yourusername).show();
+								onremotetrack: function(track, mid, on) {
+									Janus.debug("Remote track (mid=" + mid + ") " + (on ? "added" : "removed") + ":", track);
+									if(!on) {
+										// Track removed, get rid of the stream and the rendering
+										$('#peervideo' + mid).remove();
+										if(track.kind === "video") {
+											remoteVideos--;
+											if(remoteVideos === 0) {
+												// No video, at least for now: show a placeholder
+												if($('#videoright .no-video-container').length === 0) {
+													$('#videoright').append(
+														'<div class="no-video-container">' +
+															'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+															'<span class="no-video-text">No remote video available</span>' +
+														'</div>');
+												}
+											}
+										}
+										delete remoteTracks[mid];
+										return;
 									}
-									Janus.attachMediaStream($('#remotevideo').get(0), stream);
-									var videoTracks = stream.getVideoTracks();
-									if(!videoTracks || videoTracks.length === 0) {
-										// No remote video
-										$('#remotevideo').hide();
-										if($('#videoright .no-video-container').length === 0) {
-											$('#videoright').append(
-												'<div class="no-video-container">' +
-													'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
-													'<span class="no-video-text">No remote video available</span>' +
-												'</div>');
+									// If we're here, a new track was added
+									var addButtons = false;
+									if($('#videoright audio').length === 0 && $('#videoright video').length === 0) {
+										addButtons = true;
+										$('#videos').removeClass('hide').show();
+									}
+									if(track.kind === "audio") {
+										// New audio track: create a stream out of it, and use a hidden <audio> element
+										stream = new MediaStream([track]);
+										remoteTracks[mid] = stream;
+										Janus.log("Created remote audio stream:", stream);
+										$('#videoright').append('<audio class="hide" id="peervideo' + mid + '" autoplay playsinline/>');
+										Janus.attachMediaStream($('#peervideo' + mid).get(0), stream);
+										if(remoteVideos === 0) {
+											// No video, at least for now: show a placeholder
+											if($('#videoright .no-video-container').length === 0) {
+												$('#videoright').append(
+													'<div class="no-video-container">' +
+														'<i class="fa fa-video-camera fa-5 no-video-icon"></i>' +
+														'<span class="no-video-text">No webcam available</span>' +
+													'</div>');
+											}
 										}
 									} else {
+										// New video track: create a stream out of it
+										remoteVideos++;
 										$('#videoright .no-video-container').remove();
-										$('#remotevideo').removeClass('hide').show();
+										stream = new MediaStream([track]);
+										remoteTracks[mid] = stream;
+										Janus.log("Created remote video stream:", stream);
+										$('#videoright').append('<video class="rounded centered" id="peervideo' + mid + '" width="100%" height="100%" autoplay playsinline/>');
+										Janus.attachMediaStream($('#peervideo' + mid).get(0), stream);
+										// Note: we'll need this for additional videos too
+										if(!bitrateTimer) {
+											$('#curbitrate').removeClass('hide').show();
+											bitrateTimer = setInterval(function() {
+												if(!$("#peervideo" + mid).get(0))
+													return;
+												// Display updated bitrate, if supported
+												var bitrate = videocall.getBitrate();
+												//~ Janus.debug("Current bitrate is " + videocall.getBitrate());
+												$('#curbitrate').text(bitrate);
+												// Check if the resolution changed too
+												var width = $("#peervideo" + mid).get(0).videoWidth;
+												var height = $("#peervideo" + mid).get(0).videoHeight;
+												if(width > 0 && height > 0)
+													$('#curres').removeClass('hide').text(width+'x'+height).show();
+											}, 1000);
+										}
 									}
 									if(!addButtons)
 										return;
 									// Enable audio/video buttons and bitrate limiter
 									audioenabled = true;
 									videoenabled = true;
-									$('#toggleaudio').html("Disable audio").removeClass("btn-success").addClass("btn-danger")
-											.unbind('click').removeAttr('disabled').click(
+									$('#toggleaudio').removeAttr('disabled').click(
 										function() {
 											audioenabled = !audioenabled;
 											if(audioenabled)
@@ -402,8 +443,7 @@ $(document).ready(function() {
 												$('#toggleaudio').html("Enable audio").removeClass("btn-danger").addClass("btn-success");
 											videocall.send({ message: { request: "set", audio: audioenabled }});
 										});
-									$('#togglevideo').html("Disable video").removeClass("btn-success").addClass("btn-danger")
-											.unbind('click').removeAttr('disabled').click(
+									$('#togglevideo').removeAttr('disabled').click(
 										function() {
 											videoenabled = !videoenabled;
 											if(videoenabled)
@@ -413,8 +453,7 @@ $(document).ready(function() {
 											videocall.send({ message: { request: "set", video: videoenabled }});
 										});
 									$('#toggleaudio').parent().removeClass('hide').show();
-									$('#bitrateset').html("Bandwidth");
-									$('#bitrate a').unbind('click').removeAttr('disabled').click(function() {
+									$('#bitrate a').removeAttr('disabled').click(function() {
 										var id = $(this).attr("id");
 										var bitrate = parseInt(id)*1000;
 										if(bitrate === 0) {
@@ -422,24 +461,10 @@ $(document).ready(function() {
 										} else {
 											Janus.log("Capping bandwidth to " + bitrate + " via REMB");
 										}
-										$('#bitrateset').html($(this).html()).parent().removeClass('open');
+										$('#bitrateset').html($(this).html() + '<span class="caret"></span>').parent().removeClass('open');
 										videocall.send({ message: { request: "set", bitrate: bitrate }});
 										return false;
 									});
-									if(Janus.webRTCAdapter.browserDetails.browser === "chrome" || Janus.webRTCAdapter.browserDetails.browser === "firefox" ||
-											Janus.webRTCAdapter.browserDetails.browser === "safari") {
-										$('#curbitrate').removeClass('hide').show();
-										bitrateTimer = setInterval(function() {
-											// Display updated bitrate, if supported
-											var bitrate = videocall.getBitrate();
-											$('#curbitrate').text(bitrate);
-											// Check if the resolution changed too
-											var width = $("#remotevideo").get(0).videoWidth;
-											var height = $("#remotevideo").get(0).videoHeight;
-											if(width > 0 && height > 0)
-												$('#curres').removeClass('hide').text(width+'x'+height).show();
-										}, 1000);
-									}
 								},
 								ondataopen: function(data) {
 									Janus.log("The DataChannel is available!");
@@ -452,10 +477,8 @@ $(document).ready(function() {
 								},
 								oncleanup: function() {
 									Janus.log(" ::: Got a cleanup notification :::");
-									$('#myvideo').remove();
-									$('#remotevideo').remove();
-									$("#videoleft").parent().unblock();
-									$('.no-video-container').remove();
+									$("#videoleft").empty().parent().unblock();
+									$('#videoright').empty();
 									$('#callee').empty().hide();
 									yourusername = null;
 									$('#curbitrate').hide();
@@ -469,7 +492,6 @@ $(document).ready(function() {
 									if(bitrateTimer)
 										clearInterval(bitrateTimer);
 									bitrateTimer = null;
-									$('#waitingvideo').remove();
 									$('#videos').hide();
 									simulcastStarted = false;
 									$('#simulcast').remove();
@@ -477,6 +499,10 @@ $(document).ready(function() {
 									$('#call').removeAttr('disabled').html('Call')
 										.removeClass("btn-danger").addClass("btn-success")
 										.unbind('click').click(doCall);
+									localTracks = {};
+									localVideos = 0;
+									remoteTracks = {};
+									remoteVideos = 0;
 								}
 							});
 					},
@@ -550,12 +576,12 @@ function doCall() {
 	// Call this user
 	videocall.createOffer(
 		{
-			// By default, it's sendrecv for audio and video...
-			media: { data: true },	// ... let's negotiate data channels as well
-			// If you want to test simulcasting (Chrome and Firefox only), then
-			// pass a ?simulcast=true when opening this demo page: it will turn
-			// the following 'simulcast' property to pass to janus.js to true
-			simulcast: doSimulcast,
+			// We want bidirectional audio and video, plus data channels
+			tracks: [
+				{ type: 'audio', capture: true, recv: true },
+				{ type: 'video', capture: true, recv: true, simulcast: doSimulcast },
+				{ type: 'data' },
+			],
 			success: function(jsep) {
 				Janus.debug("Got SDP!", jsep);
 				var body = { request: "call", username: $('#peer').val() };
@@ -596,6 +622,15 @@ function getQueryStringValue(name) {
 	var regex = new RegExp("[\\?&]" + name + "=([^&#]*)"),
 		results = regex.exec(location.search);
 	return results === null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
+}
+
+// Helper to escape XML tags
+function escapeXmlTags(value) {
+	if(value) {
+		var escapedValue = value.replace(new RegExp('<', 'g'), '&lt');
+		escapedValue = escapedValue.replace(new RegExp('>', 'g'), '&gt');
+		return escapedValue;
+	}
 }
 
 // Helpers to create Simulcast-related UI, if enabled

@@ -9,7 +9,9 @@ Janus is an open source, general purpose, WebRTC server designed and developed b
 
 For some online demos and documentations, make sure you pay the [project website](https://janus.conf.meetecho.com/) a visit!
 
-If you have questions on Janus, or wish to discuss Janus with us and other users, please join our [meetecho-janus](https://groups.google.com/forum/#!forum/meetecho-janus) Google Group. If you encounter bugs, please submit an issue on [GitHub](https://github.com/meetecho/janus-gateway/issues): make sure you read the [guidelines](.github/ISSUE_TEMPLATE.md) before opening an issue, though.
+> **Note well:** this is the main branch for the `multistream` version of Janus, which is the new version. If you want to check the legacy version of Janus instead (i.e., `0.x`, a.k.a. "legacy") click [here](https://github.com/meetecho/janus-gateway/tree/0.x) instead.
+
+If you have questions on Janus, or wish to discuss Janus with us and other users, please join our [meetecho-janus](https://groups.google.com/forum/#!forum/meetecho-janus) Google Group. If you encounter bugs, please submit an issue on [GitHub](https://github.com/meetecho/janus-gateway/issues): make sure you read the [guidelines](.github/CONTRIBUTING.md) before opening an issue or a pull request, though.
 
 
 ## Dependencies
@@ -31,24 +33,24 @@ To install it, you'll need to satisfy the following dependencies:
 
 A couple of plugins depend on a few more libraries:
 
-* [Sofia-SIP](http://sofia-sip.sourceforge.net/) (only needed for the SIP plugin)
+* [Sofia-SIP](https://github.com/freeswitch/sofia-sip) (only needed for the SIP plugin)
 * [libopus](http://opus-codec.org/) (only needed for the AudioBridge plugin)
 * [libogg](http://xiph.org/ogg/) (needed for the VoiceMail plugin and/or post-processor, and optionally AudioBridge and Streaming plugins)
 * [libcurl](https://curl.haxx.se/libcurl/) (only needed if you are interested in RTSP support in the Streaming plugin or in the sample Event Handler plugin)
 * [Lua](https://www.lua.org/download.html) (only needed for the Lua plugin)
+* [Duktape](https://duktape.org/) (only needed for the Duktape plugin)
 
 Additionally, you'll need the following libraries and tools:
 
 * [GLib](http://library.gnome.org/devel/glib/)
 * [zlib](https://zlib.net/)
 * [pkg-config](http://www.freedesktop.org/wiki/Software/pkg-config/)
-* [gengetopt](http://www.gnu.org/software/gengetopt/)
 
 All of those libraries are usually available on most of the most common distributions. Installing these libraries on a recent Fedora, for instance, is very simple:
 
     yum install libmicrohttpd-devel jansson-devel \
        openssl-devel libsrtp-devel sofia-sip-devel glib2-devel \
-       opus-devel libogg-devel libcurl-devel pkgconfig gengetopt \
+       opus-devel libogg-devel libcurl-devel pkgconfig \
        libconfig-devel libtool autoconf automake
 
 Notice that you may have to `yum install epel-release` as well if you're attempting an installation on a CentOS machine instead.
@@ -58,7 +60,7 @@ On Ubuntu or Debian, it would require something like this:
 	aptitude install libmicrohttpd-dev libjansson-dev \
 		libssl-dev libsrtp-dev libsofia-sip-ua-dev libglib2.0-dev \
 		libopus-dev libogg-dev libcurl4-openssl-dev liblua5.3-dev \
-		libconfig-dev pkg-config gengetopt libtool automake
+		libconfig-dev pkg-config libtool automake
 
 * *Note:* please notice that libopus may not be available out of the box on your distro. In that case, you'll have to [install it manually](http://www.opus-codec.org).
 
@@ -216,7 +218,7 @@ since it is a GNU makefile. `./configure` can be run without arguments since the
 Note that the `configure.ac` is coded to use openssl in base. If you wish to use openssl from ports or any other ssl you must change `configure.ac` accordingly.
 
 	pkg install libsrtp2 libusrsctp jansson libnice libmicrohttpd libwebsockets curl opus sofia-sip libogg jansson libnice libconfig \
-        libtool gmake autoconf autoconf-wrapper glib gengetopt
+        libtool gmake autoconf autoconf-wrapper glib
 
 
 ### Building on MacOS
@@ -226,7 +228,7 @@ First of all, you can use `brew` to install most of the dependencies:
 
 	brew install jansson libnice openssl srtp libusrsctp libmicrohttpd \
 		libwebsockets cmake rabbitmq-c sofia-sip opus libogg curl glib \
-		libconfig pkg-config gengetopt autoconf automake libtool
+		libconfig pkg-config autoconf automake libtool
 
 For what concerns libwebsockets, though, make sure that the installed version is higher than `2.4.1`, or you might encounter the problems described in [this post](https://groups.google.com/forum/#!topic/meetecho-janus/HsFaEXBz4Cg). If `brew` doesn't provide a more recent version, you'll have to install the library manually.
 
@@ -303,6 +305,7 @@ or on the command line:
 	-W, --slowlink-threshold=number
                                   Number of lost packets (per s) that should
                                   trigger a 'slowlink' Janus API event to users
+                                  (default=0, feature disabled)
 	-r, --rtp-port-range=min-max  Port range to use for RTP/RTCP (only available
 								  if the installed libnice supports it)
 	-B, --twcc-period=number      How often (in ms) to send TWCC feedback back to
