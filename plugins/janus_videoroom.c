@@ -5594,8 +5594,18 @@ void janus_videoroom_incoming_rtcp(janus_plugin_session *handle, janus_plugin_rt
 		if(bitrate > 0) {
 			/* FIXME We got a REMB from this subscriber, should we do something about it? */
 			/* 수정해야할곳인가? */
+			/*
 			session->peer_bitrate = bitrate;
 			gateway->send_remb(handle, session->bitrate ? session->bitrate : 10000000);
+			*/
+
+			/* A subscriber sent REMB. Forward it to the publisher, if available. */
+			if(s->feed) {
+				janus_videoroom_publisher *p = s->feed;
+				if(p && p->session && p->session->handle) {
+					gateway->send_remb(p->session->handle, bitrate);
+				}
+			}
 		}
 		janus_refcount_decrease_nodebug(&s->ref);
 	}
